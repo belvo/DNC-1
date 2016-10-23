@@ -9,6 +9,6 @@ Original code run on only cpu.
 
 This code run also on the gpu.
 
-@Buzzni
-
-
+main contributor
+- Seung-Hoon Na / http://nlp.chonbuk.ac.kr
+- Sang-Hyob Nam / http://buzzni.com
