@@ -2,82 +2,115 @@
 '''
 source code for train chatbot with DNC
 '''
-from DNC.DNC import DNC, optimizers, xp, Variable, cuda, np, _gpu_id
+from DNC.DNC import DNC, optimizers, xp, Variable, cuda, np, _gpu_id, onehot
 import chainer
 from sklearn.externals import joblib
 
 
 class ChatBot():
     def __init__(self):
-        X = 5
-        Y = 5
-        N = 10*2
-        W = 10*2
-        R = 3*2
-        self.mdl = DNC(X, Y, N, W, R)
-        self.opt = optimizers.Adam()
-        self.opt.setup(self.mdl)
+        self.X = 5
+        self.Y = 5
+        self.N = 10
+        self.W = 10
+        self.R = 3
+
+        # self.mdl = DNC(self.X, self.Y, self.N, self.W, self.R)
+        # self.opt = optimizers.Adam()
+        # self.opt.setup(self.mdl)
+        self.mdl = None
+        self.opt = None
         self.id2wordDict = {}
         self.word2idDict = {}
         self.loss = 0
         self.acc = 0
 
+    def predict(self,x_list):
+        datacnt = 1
+        content_str_list = x_list
+        content = map(lambda i: self.word2idDict[i], content_str_list)
+
+        seqlen = len(content)
+
+        x_seq_list = [float('nan')] * seqlen
+        for i in range(seqlen):
+            x_seq_list[i] = onehot(content[i], self.X)
+
+        self.mdl.reset_state()
+        y_list = []
+        for cnt in range(seqlen):
+            x = Variable(cuda.to_gpu(x_seq_list[cnt].reshape(1, self.X), _gpu_id))
+            y = self.mdl(x)
+            y_list.append(self.id2wordDict[int(y.data.argmax())])
+        return y_list
+
     def train(self, x_list, y_list):
+        datanum = len(x_list)
+
         word_set = set()
         for each in x_list:
             word_set.update(each)
         for each in y_list:
             word_set.update(each)
-
+        self.X = len(word_set)
+        self.Y = len(word_set)
+        self.mdl = DNC(self.X, self.Y, self.N, self.W, self.R)
+        self.opt = optimizers.Adam()
+        self.opt.setup(self.mdl)
+        loss = 0.0
+        acc = 0.0
         self.id2wordDict = dict(zip(range(len(word_set)), list(word_set)))
         self.word2idDict = dict(map(lambda (k, v): (v, k), self.id2wordDict.items()))
-        model_dict = {'id2wordDict':self.id2wordDict,'word2idDict':self.word2idDict}
-        data_size = len(input_list)
-        for idx in range(70):
+        for batch in range(1,101):
+            print "batch", batch
+            if batch%5 == 0:
+                print "check!!!", batch
+                for test_list in x_list:
+                    print "test question:", " ".join(test_list)
+                    answer_list = chatbot.predict(test_list)
+                    print "asnwer:", " ".join(answer_list)
 
-            lossfrac = xp.zeros((1, 2))
+            for datacnt in range(datanum):
+                lossfrac = xp.zeros((1, 2))
+                content_str_list = input_list[datacnt]
+                content = map(lambda i: self.word2idDict[i], content_str_list)
 
-            # DEBUG point1
-            # self.mdl.reset_state()
+                true_content_str_list = output_list[datacnt]
+                true_content = map(lambda i: self.word2idDict[i], true_content_str_list)
 
-            for idx2, (each_x, each_y) in  enumerate(zip(x_list, y_list)):
-                input = map(lambda i: self.word2idDict[i], each_x)
-                x = Variable(cuda.to_gpu(xp.array([input], np.float32), _gpu_id))
-                output = map(lambda i: self.word2idDict[i], each_y)
-                t = Variable(cuda.to_gpu(xp.array([output], np.float32), _gpu_id))
-                y = self.mdl(x)
-                if (isinstance(t, chainer.Variable)):
-                    self.loss += (y - t) ** 2
-                    is_equal = map(lambda i: int(i + 0.5), y.data[0]) == map(lambda i: int(i), t.data[0]), map(lambda i: int(i + 0.5), y.data[0]), map(
-                        lambda i: int(i),
-                        t.data[0])
-                    try:
-                        print "question:", " ".join(each_x)
-                        print "answer:", " ".join(map(lambda i: self.id2wordDict[i], map(lambda i: int(i + 0.5), y.data[0])))
-                    except Exception, e2:
-                        print e2
-                    if is_equal: self.acc += 1
+                contentlen = len(content)
+                seqlen = len(content)
+                x_seq_list = [float('nan')] * seqlen
+                t_seq_list = [float('nan')] * seqlen
+                for i in range(seqlen):
+                    x_seq_list[i] = onehot(content[i], self.X)
+                    t_seq_list[i] = onehot(true_content[i], self.X)
 
-                # DEBUG point2
-                if True:
-                # if idx2 == data_size-1:
-                    self.mdl.cleargrads()
-                    print '(', idx, ')', "loss:", self.loss.data[0].sum()
+                self.mdl.reset_state()
+                for cnt in range(seqlen):
+                    x = Variable(cuda.to_gpu(x_seq_list[cnt].reshape(1, self.X), _gpu_id))
+                    if (isinstance(t_seq_list[cnt], xp.ndarray)):
+                        t = Variable(cuda.to_gpu(t_seq_list[cnt].reshape(1, self.Y), _gpu_id))
+                    else:
+                        t = []
+                    y = self.mdl(x)
+                    if (isinstance(t, chainer.Variable)):
+                        loss += (y - t) ** 2
+                        if (np.argmax(y.data) == np.argmax(t.data)): acc += 1
+                    if (cnt == seqlen - 1):
+                        self.mdl.cleargrads()
+                        print batch, '(', datacnt, ')', loss.data[0].sum(), acc
 
-                    self.loss.grad = xp.ones(self.loss.data.shape, dtype=np.float32)
-                    self.loss.backward()
-                    if idx>0:
+                        loss.grad = xp.ones(loss.data.shape, dtype=np.float32)
+                        loss.backward()
                         self.opt.update()
-                    self.loss.unchain_backward()
-                    self.loss = 0
-                    self.acc = 0
+                        loss.unchain_backward()
+                        print batch, '(', datacnt, ')', loss.data.sum() / loss.data.size / contentlen, acc / contentlen
+                        lossfrac += xp.array([loss.data.sum() / loss.data.size / seqlen, 1.], np.float32)
+                        loss = 0.0
+                        acc = 0.0
 
 
-        print "test question1:", " ".join(["<start>", u"오늘", u"날씨가", u"어때", "<eos>"])
-        input = map(lambda i: self.word2idDict[i], ["<start>", u"오늘", u"날씨가", u"어때", "<eos>"])
-        x = Variable(cuda.to_gpu(xp.array([input], np.float32), _gpu_id))
-        y = self.mdl(x)
-        print "answer1:", " ".join(map(lambda i: self.id2wordDict[i], map(lambda i: int(i + 0.5), y.data[0])))
 
 
 if __name__ == '__main__':
@@ -88,10 +121,7 @@ if __name__ == '__main__':
     chatbot = ChatBot()
     chatbot.train(input_list,output_list)
     joblib.dump(chatbot,"/home/dev/data/DNC_test.4.model")
-    print "test question2:",  " ".join(["<start>", u"내일", u"비가", u"올까", "<eos>"])
-    input = map(lambda i: chatbot.word2idDict[i], ["<start>", u"내일", u"비가", u"올까", "<eos>"])
-    x = Variable(cuda.to_gpu(xp.array([input], np.float32), _gpu_id))
-    y = chatbot.mdl(x)
-    print "answer2:", " ".join(map(lambda i: chatbot.id2wordDict[i], map(lambda i: int(i + 0.5), y.data[0])))
-
-
+    for test_list in input_list[::-1]:
+        print "test question:",  " ".join(test_list)
+        answer_list = chatbot.predict(test_list)
+        print "asnwer:"," ".join(answer_list)
