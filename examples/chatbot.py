@@ -32,10 +32,15 @@ class ChatBot():
         self.id2wordDict = dict(zip(range(len(word_set)), list(word_set)))
         self.word2idDict = dict(map(lambda (k, v): (v, k), self.id2wordDict.items()))
         model_dict = {'id2wordDict':self.id2wordDict,'word2idDict':self.word2idDict}
-        for idx in range(50):
+        data_size = len(input_list)
+        for idx in range(70):
 
             lossfrac = xp.zeros((1, 2))
-            for each_x, each_y in zip(x_list, y_list):
+
+            # DEBUG point1
+            # self.mdl.reset_state()
+
+            for idx2, (each_x, each_y) in  enumerate(zip(x_list, y_list)):
                 input = map(lambda i: self.word2idDict[i], each_x)
                 x = Variable(cuda.to_gpu(xp.array([input], np.float32), _gpu_id))
                 output = map(lambda i: self.word2idDict[i], each_y)
@@ -51,45 +56,29 @@ class ChatBot():
                         print "answer:", " ".join(map(lambda i: self.id2wordDict[i], map(lambda i: int(i + 0.5), y.data[0])))
                     except Exception, e2:
                         print e2
-                    # if idx==49:
-                    #     print "BREAK!!"
-                    #     break
                     if is_equal: self.acc += 1
-                self.mdl.cleargrads()
-                print '(', idx, ')', "loss:", self.loss.data[0].sum()
 
-                self.loss.grad = xp.ones(self.loss.data.shape, dtype=np.float32)
-                self.loss.backward()
-                if idx>0:
-                    self.opt.update()
-                self.loss.unchain_backward()
-                #             print '(', idx, ')', loss.data.sum()/loss.data.size/contentlen, acc/contentlen
-                # lossfrac += xp.array([loss.data.sum() / loss.data.size / seqlen, 1.], np.float32)
-                # if idx%5 == 0:
-                #     model_dict['mdl'] = self.mdl
-                #     joblib.dump(model_dict,"/home/dev/data/DNC_test.2.model")
-                # loss = 0.0
-                # acc = 0.0
-                self.loss = 0
-                self.acc = 0
-                # break
-                # input = map(lambda i: self.word2idDict[i], ["<start>", u"내일", u"비가", u"올까", "<eos>"])
-                # x = Variable(cuda.to_gpu(xp.array([input], np.float32), _gpu_id))
-                # y = self.mdl(x)
-                # try:
-                #     print "answer0:", " ".join(map(lambda i: self.id2wordDict[i], map(lambda i: int(i + 0.5), y.data[0])))
-                # except Exception,e2:
-                #     print e2
-                #     continue
+                # DEBUG point2
+                if True:
+                # if idx2 == data_size-1:
+                    self.mdl.cleargrads()
+                    print '(', idx, ')', "loss:", self.loss.data[0].sum()
+
+                    self.loss.grad = xp.ones(self.loss.data.shape, dtype=np.float32)
+                    self.loss.backward()
+                    if idx>0:
+                        self.opt.update()
+                    self.loss.unchain_backward()
+                    self.loss = 0
+                    self.acc = 0
 
 
+        print "test question1:", " ".join(["<start>", u"오늘", u"날씨가", u"어때", "<eos>"])
         input = map(lambda i: self.word2idDict[i], ["<start>", u"오늘", u"날씨가", u"어때", "<eos>"])
         x = Variable(cuda.to_gpu(xp.array([input], np.float32), _gpu_id))
-        y = self.mdl.predict(x)
+        y = self.mdl(x)
         print "answer1:", " ".join(map(lambda i: self.id2wordDict[i], map(lambda i: int(i + 0.5), y.data[0])))
 
-                # model_dict['mdl'] = self.mdl
-        # joblib.dump(model_dict, "/home/dev/data/DNC_test.2.model")
 
 if __name__ == '__main__':
     input_list = [["<start>", u"오늘", u"날씨가", u"어때", "<eos>"], ["<start>", u"오늘", u"온도는", u"어때", "<eos>"], \
@@ -99,9 +88,10 @@ if __name__ == '__main__':
     chatbot = ChatBot()
     chatbot.train(input_list,output_list)
     joblib.dump(chatbot,"/home/dev/data/DNC_test.4.model")
+    print "test question2:",  " ".join(["<start>", u"내일", u"비가", u"올까", "<eos>"])
     input = map(lambda i: chatbot.word2idDict[i], ["<start>", u"내일", u"비가", u"올까", "<eos>"])
     x = Variable(cuda.to_gpu(xp.array([input], np.float32), _gpu_id))
-    y = chatbot.mdl.predict(x)
+    y = chatbot.mdl(x)
     print "answer2:", " ".join(map(lambda i: chatbot.id2wordDict[i], map(lambda i: int(i + 0.5), y.data[0])))
 
 
