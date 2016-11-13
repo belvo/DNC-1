@@ -1,3 +1,4 @@
+# coding:utf-8
 '''
 GPU version of DNC
 reference paper
@@ -87,7 +88,7 @@ class DNC(Chain):
         self.W = W  # dimension of one memory slot
         self.R = R  # number of read heads
         self.controller = DeepLSTM(W * R + X, Y + W * R + 3 * W + 5 * R + 3)
-        cuda.get_device(0).use()  # Make a specified GPU current
+        cuda.get_device(_gpu_id).use()  # Make a specified GPU current
         self.controller.to_gpu(_gpu_id)
 
         super(DNC, self).__init__(
@@ -143,8 +144,8 @@ class DNC(Chain):
         self.wwrep = F.matmul(self.ww, Variable(cuda.to_gpu(np.ones((1, self.N)).astype(np.float32), _gpu_id)))  # N * N
         self.L = (1.0 - self.wwrep - F.transpose(self.wwrep)) * self.L + F.matmul(self.ww, F.transpose(self.p))  # N * N
         self.L = self.L * (
-        Variable(cuda.to_gpu(np.ones((self.N, self.N)).astype(np.float32), _gpu_id)) - Variable(cuda.to_gpu(np.eye(self.N).astype(np.float32)),
-                                                                                                _gpu_id))  # force L[i,i] == 0
+            Variable(cuda.to_gpu(np.ones((self.N, self.N)).astype(np.float32), _gpu_id)) - Variable(cuda.to_gpu(np.eye(self.N).astype(np.float32)),
+                                                                                                    _gpu_id))  # force L[i,i] == 0
 
         self.fo = F.matmul(self.L, self.wr)  # N * R
         self.ba = F.matmul(F.transpose(self.L), self.wr)  # N * R
@@ -164,6 +165,73 @@ class DNC(Chain):
 
         self.y = self.l_Wr(self.r) + self.nu  # 1 * Y
         return self.y
+
+    def predict(self, x):
+        '''
+        위 함수와 차이점은 self.u ,self.p ,self.L ,self.M ,self.r ,self.wr,self.ww 이 값들을 업데이트 하지 않고 쓰기만 한다는 점이다
+        @param x:
+        @return:
+        '''
+        self.chi = F.concat((x, self.r))
+        (self.nu, self.xi) = \
+            F.split_axis(self.l_dl(self.chi), [self.Y], 1)
+        (self.kr, self.betar, self.kw, self.betaw,
+         self.e, self.v, self.f, self.ga, self.gw, self.pi
+         ) = F.split_axis(self.xi, np.cumsum(
+            [self.W * self.R, self.R, self.W, 1, self.W, self.W, self.R, 1, 1]), 1)
+
+        self.kr = F.reshape(self.kr, (self.R, self.W))  # R * W
+        self.betar = 1 + F.softplus(self.betar)  # 1 * R
+        # self.kw: 1 * W
+        self.betaw = 1 + F.softplus(self.betaw)  # 1 * 1
+        self.e = F.sigmoid(self.e)  # 1 * W
+        # self.v : 1 * W
+        self.f = F.sigmoid(self.f)  # 1 * R
+        self.ga = F.sigmoid(self.ga)  # 1 * 1
+        self.gw = F.sigmoid(self.gw)  # 1 * 1
+        self.pi = F.softmax(F.reshape(self.pi, (self.R, 3)))  # R * 3 (softmax for 3)
+
+        # self.wr : N * R
+        self.psi_mat = 1 - F.matmul(Variable(cuda.to_gpu(np.ones((self.N, 1)).astype(np.float32), _gpu_id)), self.f) * self.wr  # N * R
+        self.psi = Variable(cuda.to_gpu(np.ones((self.N, 1)).astype(np.float32), _gpu_id))  # N * 1
+
+        for i in range(self.R):
+            select_i = F.select_item(self.psi_mat, Variable(cuda.to_gpu(np.array([i] * self.N), _gpu_id)))
+
+            self.psi = self.psi * F.reshape(select_i, (self.N, 1))
+
+        u = (self.u + self.ww - (self.u * self.ww)) * self.psi
+
+        self.a = u2a(u)  # N * 1
+        self.cw = C(self.M, self.kw, self.betaw)  # N * 1
+
+        ww = F.matmul(F.matmul(self.a, self.ga) + F.matmul(self.cw, 1.0 - self.ga), self.gw)  # N * 1
+        M = self.M * (Variable(cuda.to_gpu(np.ones((self.N, self.W)).astype(np.float32), _gpu_id)) - F.matmul(ww, self.e)) + F.matmul(ww, self.v)  # N * W
+        p = (1.0 - F.matmul(Variable(cuda.to_gpu(np.ones((self.N, 1)).astype(np.float32), _gpu_id)), F.reshape(F.sum(ww), (1, 1)))) \
+            * self.p + ww  # N * 1
+        self.wwrep = F.matmul(ww, Variable(cuda.to_gpu(np.ones((1, self.N)).astype(np.float32), _gpu_id)))  # N * N
+        L = (1.0 - self.wwrep - F.transpose(self.wwrep)) * self.L + F.matmul(ww, F.transpose(p))  # N * N
+        L = L * (Variable(cuda.to_gpu(np.ones((self.N, self.N)).astype(np.float32), _gpu_id)) - Variable(cuda.to_gpu(np.eye(self.N).astype(np.float32)),
+                                                                                                         _gpu_id))  # force L[i,i] == 0
+
+        self.fo = F.matmul(L, self.wr)  # N * R
+        self.ba = F.matmul(F.transpose(L), self.wr)  # N * R
+
+        self.cr_list = [0] * self.R
+        for i in range(self.R):
+            self.cr_list[i] = C(M, F.reshape(F.select_item(F.transpose(self.kr), Variable(cuda.to_gpu(np.array([i] * self.W), _gpu_id))), (1, self.W)),
+                                F.reshape(F.select_item(self.betar, Variable(cuda.to_gpu(np.array([i]), _gpu_id))), (1, 1)))  # N * 1
+        self.cr = F.concat(self.cr_list)  # N * R
+
+        self.bacrfo = F.concat((F.reshape(F.transpose(self.ba), (self.R, self.N, 1)),
+                                F.reshape(F.transpose(self.cr), (self.R, self.N, 1)),
+                                F.reshape(F.transpose(self.fo), (self.R, self.N, 1)),), 2)  # R * N * 3
+        self.pi = F.reshape(self.pi, (self.R, 3, 1))  # R * 3 * 1
+        wr = F.transpose(F.reshape(F.batch_matmul(self.bacrfo, self.pi), (self.R, self.N)))  # N * R
+        r = F.reshape(F.matmul(F.transpose(M), wr), (1, self.R * self.W))  # W * R (-> 1 * RW)
+
+        y = self.l_Wr(r) + self.nu  # 1 * Y
+        return y
 
     def reset_state(self):
         self.l_dl.reset_state()
@@ -185,65 +253,63 @@ class DNC(Chain):
         # any variable else ?
 
 
-X = 5
-Y = 5
-N = 10
-W = 10
-R = 2
-mdl = DNC(X, Y, N, W, R)
-opt = optimizers.Adam()
-opt.setup(mdl)
-datanum = 100000
-# datanum = 1
-loss = 0.0
-acc = 0.0
-for datacnt in range(datanum):
-    lossfrac = xp.zeros((1, 2))
-    # x_seq = np.random.rand(X,seqlen).astype(np.float32)
-    # t_seq = np.random.rand(Y,seqlen).astype(np.float32)
-    # t_seq = np.copy(x_seq)
+if __name__ == '__main__':
+    X = 5
+    Y = 5
+    N = 10
+    W = 10
+    R = 2
+    mdl = DNC(X, Y, N, W, R)
+    opt = optimizers.Adam()
+    opt.setup(mdl)
+    datanum = 100000
+    # datanum = 1
+    loss = 0.0
+    acc = 0.0
+    for datacnt in range(datanum):
+        lossfrac = xp.zeros((1, 2))
+        # x_seq = np.random.rand(X,seqlen).astype(np.float32)
+        # t_seq = np.random.rand(Y,seqlen).astype(np.float32)
+        # t_seq = np.copy(x_seq)
 
-    contentlen = np.random.randint(3, 6)
-    content = np.random.randint(0, X - 1, contentlen)
-    seqlen = contentlen + contentlen
-    x_seq_list = [float('nan')] * seqlen
-    t_seq_list = [float('nan')] * seqlen
-    for i in range(seqlen):
-        if (i < contentlen):
-            x_seq_list[i] = onehot(content[i], X)
-        elif (i == contentlen):
-            x_seq_list[i] = onehot(X - 1, X)
-        else:
-            x_seq_list[i] = xp.zeros(X).astype(np.float32)
+        contentlen = np.random.randint(3, 6)
+        content = np.random.randint(0, X - 1, contentlen)
+        seqlen = contentlen + contentlen
+        x_seq_list = [float('nan')] * seqlen
+        t_seq_list = [float('nan')] * seqlen
+        for i in range(seqlen):
+            if (i < contentlen):
+                x_seq_list[i] = onehot(content[i], X)
+            elif (i == contentlen):
+                x_seq_list[i] = onehot(X - 1, X)
+            else:
+                x_seq_list[i] = xp.zeros(X).astype(np.float32)
 
-        if (i >= contentlen):
-            t_seq_list[i] = onehot(content[i - contentlen], X)
+            if (i >= contentlen):
+                t_seq_list[i] = onehot(content[i - contentlen], X)
 
-    mdl.reset_state()
-    for cnt in range(seqlen):
-        x = Variable(cuda.to_gpu(x_seq_list[cnt].reshape(1, X), _gpu_id))
-        if (isinstance(t_seq_list[cnt], xp.ndarray)):
-            t = Variable(cuda.to_gpu(t_seq_list[cnt].reshape(1, Y), _gpu_id))
-        else:
-            t = []
+        mdl.reset_state()
+        for cnt in range(seqlen):
+            x = Variable(cuda.to_gpu(x_seq_list[cnt].reshape(1, X), _gpu_id))
+            if (isinstance(t_seq_list[cnt], xp.ndarray)):
+                t = Variable(cuda.to_gpu(t_seq_list[cnt].reshape(1, Y), _gpu_id))
+            else:
+                t = []
 
-        y = mdl(x)
-        if (isinstance(t, chainer.Variable)):
-            loss += (y - t) ** 2
-            print y.data, t.data, np.argmax(y.data) == np.argmax(t.data)
-            if (np.argmax(y.data) == np.argmax(t.data)): acc += 1
-        if (cnt + 1 == seqlen):
-            mdl.cleargrads()
-            print '(', datacnt, ')', loss.data
+            y = mdl(x)
+            if (isinstance(t, chainer.Variable)):
+                loss += (y - t) ** 2
+                print y.data, t.data, np.argmax(y.data) == np.argmax(t.data)
+                if (np.argmax(y.data) == np.argmax(t.data)): acc += 1
+            if (cnt + 1 == seqlen):
+                mdl.cleargrads()
+                print '(', datacnt, ')', loss.data
 
-            loss.grad = xp.ones(loss.data.shape, dtype=np.float32)
-            loss.backward()
-            opt.update()
-            loss.unchain_backward()
-            print '(', datacnt, ')', loss.data.sum() / loss.data.size / contentlen, acc / contentlen
-            lossfrac += xp.array([loss.data.sum() / loss.data.size / seqlen, 1.], np.float32)
-            loss = 0.0
-            acc = 0.0
-
-
-
+                loss.grad = xp.ones(loss.data.shape, dtype=np.float32)
+                loss.backward()
+                opt.update()
+                loss.unchain_backward()
+                print '(', datacnt, ')', loss.data.sum() / loss.data.size / contentlen, acc / contentlen
+                lossfrac += xp.array([loss.data.sum() / loss.data.size / seqlen, 1.], np.float32)
+                loss = 0.0
+                acc = 0.0
